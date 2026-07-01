@@ -9,7 +9,7 @@
 {%- assign product_id     = product.id | default: 'demo' -%}
 {%- assign product_handle = product.handle | default: 'demo' -%}
 {%- assign shop_domain    = shop.permanent_domain -%}
-{%- assign api_base       = block.settings.api_base | default: 'https://reviews-app-shopify.vercel.app' -%}
+{%- assign api_base       = block.settings.api_base | default: 'https://review-lovely-lady.vercel.app' -%}
 
 <section
   class="evo-rw"
@@ -442,7 +442,7 @@
       "type": "text",
       "id": "api_base",
       "label": "App API base URL",
-      "default": "https://reviews-app-shopify.vercel.app",
+      "default": "https://review-lovely-lady.vercel.app",
       "info": "Vercel URL where the Remix app is deployed."
     }
   ]

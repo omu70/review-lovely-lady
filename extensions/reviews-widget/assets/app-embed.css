@@ -205,3 +205,29 @@
   background:transparent; border:0; font-size:22px; cursor:pointer; color:#6B7280;
 }
 .evo-rw__form-msg{ font-size:13px; margin-top:8px; min-height:18px; }
+
+/* ===== Lovely Lady storefront tweaks (loaded site-wide via the app embed) ===== */
+/* Clamp product-card titles to a tidy 2 lines so cards line up evenly */
+.grid-product__meta .grid-product__title.grid-product__title--body{
+  display:-webkit-box !important;
+  -webkit-line-clamp:2 !important;
+  -webkit-box-orient:vertical !important;
+  overflow:hidden !important;
+  max-height:2.7em !important;
+  min-height:2.55em;
+}
+/* Make the price a touch darker than the theme's default slate */
+.grid-product__price{
+  color:#141b24 !important;
+}
+
+/* Safety: never let the card badge overflow a tight container (e.g. reels/carousels) */
+.evo-card-badge{
+  display:inline-flex !important;
+  flex-wrap:wrap !important;
+  align-items:center !important;
+  max-width:100% !important;
+  min-width:0 !important;
+  overflow:hidden !important;
+  row-gap:2px;
+}

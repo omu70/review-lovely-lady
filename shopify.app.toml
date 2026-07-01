@@ -13,8 +13,8 @@
 # =============================================================
 
 client_id = "f4ec90b678d46e8ffb3e586037c4f101"
-name = "Reviews"
-handle = "reviews-app"
+name = "Reviews App by DiziGroww"
+handle = "review-lovely-lady"
 application_url = "https://review-lovely-lady.vercel.app"
 embedded = true
 
@@ -49,4 +49,3 @@ api_version = "2024-10"
 embedded = false
 
 [build]
-include_config_on_deploy = true

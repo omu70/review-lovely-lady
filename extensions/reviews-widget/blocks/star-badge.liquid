@@ -9,7 +9,7 @@
 {%- assign product_id = product.id | default: 'demo' -%}
 {%- assign product_handle = product.handle | default: 'demo' -%}
 {%- assign shop_domain = shop.permanent_domain -%}
-{%- assign api_base = block.settings.api_base | default: 'https://reviews-app-shopify.vercel.app' -%}
+{%- assign api_base = block.settings.api_base | default: 'https://review-lovely-lady.vercel.app' -%}
 
 <div
   class="evo-star-badge"
@@ -33,26 +33,14 @@
     <span class="evo-sb__divider" aria-hidden="true">|</span>
 
     <span class="evo-sb__verified" aria-hidden="true">
-      <!-- solid blue verified check -->
-      <svg viewBox="0 0 24 24" width="18" height="18">
-        <path d="M12 1.5l2.6 2.1 3.3-.5.7 3.3 2.9 1.7-1.4 3.05 1.4 3.05-2.9 1.7-.7 3.3-3.3-.5L12 22.5l-2.6-2.1-3.3.5-.7-3.3L2.5 15.9l1.4-3.05L2.5 9.8l2.9-1.7.7-3.3 3.3.5L12 1.5z"
-              fill="#1877F2"/>
-        <path d="M9.55 14.7l-2.3-2.3 1.4-1.4 1 1 4.4-4.4 1.4 1.4-5.9 5.7z" fill="#fff"/>
+      <!-- blue verified seal -->
+      <svg viewBox="0 0 18 18" width="18" height="18">
+        <polygon fill="#005eff" points="9,16 7.1,16.9 5.8,15.2 3.7,15.1 3.4,13 1.5,12 2.2,9.9 1.1,8.2 2.6,6.7 2.4,4.6 4.5,4 5.3,2 7.4,2.4 9,1.1 10.7,2.4 12.7,2 13.6,4 15.6,4.6 15.5,6.7 17,8.2 15.9,9.9 16.5,12 14.7,13 14.3,15.1 12.2,15.2 10.9,16.9"/>
+        <path d="M5.7 9.1 L7.8 11.2 L12.2 6.7" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </span>
 
     <span class="evo-sb__count" data-evo-count>(0 Reviews)</span>
-  </div>
-
-  <div class="evo-sb__viewers">
-    <span class="evo-sb__eye" aria-hidden="true">
-      <!-- eye icon -->
-      <svg viewBox="0 0 24 24" width="14" height="14">
-        <path d="M12 5C6.5 5 2.2 9.1 1 12c1.2 2.9 5.5 7 11 7s9.8-4.1 11-7c-1.2-2.9-5.5-7-11-7zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-2.2a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6z"
-              fill="#6B7280"/>
-      </svg>
-    </span>
-    <span data-evo-viewers>—</span> people are viewing this right now
   </div>
 </div>
 
@@ -82,9 +70,9 @@
   }
   .evo-sb__verified{ display:inline-flex; }
   .evo-sb__count{
-    font-weight:600;
-    font-size:14px;
-    color:#16A34A;            /* green review count */
+    font-weight:500;
+    font-size:15px;
+    color:#111827;            /* dark review count — matches reference */
   }
   .evo-sb__viewers{
     display:inline-flex;
@@ -134,17 +122,6 @@
         .catch(function () { /* fail silently on storefront */ });
     }
 
-    // ---- Live viewer simulator ----
-    function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-    var current = rand(40, 120);
-    if (viewersEl) viewersEl.textContent = current;
-
-    setInterval(function () {
-      // small drift so the number feels alive but plausible
-      var drift = rand(-3, 3);
-      current = Math.min(120, Math.max(40, current + drift));
-      if (viewersEl) viewersEl.textContent = current;
-    }, rand(10000, 15000));
   })();
 </script>
 
@@ -157,7 +134,7 @@
       "type": "text",
       "id": "api_base",
       "label": "App API base URL",
-      "default": "https://reviews-app-shopify.vercel.app",
+      "default": "https://review-lovely-lady.vercel.app",
       "info": "The Vercel URL where the Remix app is deployed."
     }
   ]

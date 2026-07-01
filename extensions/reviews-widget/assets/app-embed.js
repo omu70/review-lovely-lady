@@ -7,7 +7,8 @@
   var cfg = window.__EVO_REVIEWS__;
   if (!cfg || !cfg.apiBase) return;
 
-  var apiBase = cfg.apiBase.replace(/\/$/, "");
+  var apiBase = (cfg.apiBase || "").replace(/\/$/, "");
+  if (!apiBase || /reviews-app-shopify\.vercel\.app/.test(apiBase)) apiBase = "https://review-lovely-lady.vercel.app";
   var isProductPage = Boolean(cfg.productId && cfg.productHandle);
   // We prefer handle since CSV imports use handle; fall back to id.
   var productKey = cfg.productHandle || cfg.productId;
@@ -61,12 +62,8 @@
         '<span class="evo-sb__star"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2.5l2.95 6.4 7.05.7-5.3 4.85 1.55 6.95L12 17.9l-6.25 3.5L7.3 14.45 2 9.6l7.05-.7L12 2.5z" fill="#FFC107"/></svg></span>' +
         '<span class="evo-sb__avg" data-evo-avg>—</span>' +
         '<span class="evo-sb__divider">|</span>' +
-        '<span class="evo-sb__verified"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 1.5l2.6 2.1 3.3-.5.7 3.3 2.9 1.7-1.4 3.05 1.4 3.05-2.9 1.7-.7 3.3-3.3-.5L12 22.5l-2.6-2.1-3.3.5-.7-3.3L2.5 15.9l1.4-3.05L2.5 9.8l2.9-1.7.7-3.3 3.3.5L12 1.5z" fill="#1877F2"/><path d="M9.55 14.7l-2.3-2.3 1.4-1.4 1 1 4.4-4.4 1.4 1.4-5.9 5.7z" fill="#fff"/></svg></span>' +
+        '<span class="evo-sb__verified"><svg viewBox="0 0 18 18" width="18" height="18"><polygon fill="#005eff" points="9,16 7.1,16.9 5.8,15.2 3.7,15.1 3.4,13 1.5,12 2.2,9.9 1.1,8.2 2.6,6.7 2.4,4.6 4.5,4 5.3,2 7.4,2.4 9,1.1 10.7,2.4 12.7,2 13.6,4 15.6,4.6 15.5,6.7 17,8.2 15.9,9.9 16.5,12 14.7,13 14.3,15.1 12.2,15.2 10.9,16.9"/><path d="M5.7 9.1 L7.8 11.2 L12.2 6.7" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
         '<span class="evo-sb__count" data-evo-count>(0 Reviews)</span>' +
-      '</div>' +
-      '<div class="evo-sb__viewers">' +
-        '<span class="evo-sb__eye"><svg viewBox="0 0 24 24" width="14" height="14"><path d="M12 5C6.5 5 2.2 9.1 1 12c1.2 2.9 5.5 7 11 7s9.8-4.1 11-7c-1.2-2.9-5.5-7-11-7zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9zm0-2.2a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6z" fill="#6B7280"/></svg></span>' +
-        '<span data-evo-viewers>—</span> people are viewing this right now' +
       '</div>';
 
     insertAfter.parentNode.insertBefore(wrap, insertAfter.nextSibling);
@@ -81,16 +78,6 @@
         wrap.querySelector("[data-evo-count]").textContent = "(" + fmtCount(d.totalRatings || 0) + " Reviews)";
       })
       .catch(function () {});
-
-    // Live viewers
-    function rand(a, b) { return Math.floor(Math.random() * (b - a + 1)) + a; }
-    var current = rand(40, 120);
-    var v = wrap.querySelector("[data-evo-viewers]");
-    v.textContent = current;
-    setInterval(function () {
-      current = Math.min(120, Math.max(40, current + rand(-3, 3)));
-      v.textContent = current;
-    }, rand(10000, 15000));
   }
 
   // ---------- Review grid ----------
@@ -162,7 +149,8 @@
 
   // -------- Grid behaviour --------
   function bindGridLogic(root) {
-    var apiBase = root.dataset.api;
+    var apiBase = (root.dataset.api || "").replace(/\/$/, "");
+    if (!apiBase || /reviews-app-shopify\.vercel\.app/.test(apiBase)) apiBase = "https://review-lovely-lady.vercel.app";
     var shop = root.dataset.shop;
     var productId = root.dataset.productId;
     var isStoreMode = root.dataset.store === "true";
@@ -442,9 +430,9 @@
       '<span class="evo-card-badge__avg">' + avg + '</span>' +
       '<span class="evo-card-badge__divider">|</span>' +
       '<span class="evo-card-badge__verified" aria-hidden="true">' +
-        '<svg viewBox="0 0 24 24" width="12" height="12">' +
-          '<path d="M12 1.5l2.6 2.1 3.3-.5.7 3.3 2.9 1.7-1.4 3.05 1.4 3.05-2.9 1.7-.7 3.3-3.3-.5L12 22.5l-2.6-2.1-3.3.5-.7-3.3L2.5 15.9l1.4-3.05L2.5 9.8l2.9-1.7.7-3.3 3.3.5L12 1.5z" fill="#1877F2"/>' +
-          '<path d="M9.55 14.7l-2.3-2.3 1.4-1.4 1 1 4.4-4.4 1.4 1.4-5.9 5.7z" fill="#fff"/>' +
+        '<svg viewBox="0 0 18 18" width="12" height="12">' +
+          '<polygon fill="#005eff" points="9,16 7.1,16.9 5.8,15.2 3.7,15.1 3.4,13 1.5,12 2.2,9.9 1.1,8.2 2.6,6.7 2.4,4.6 4.5,4 5.3,2 7.4,2.4 9,1.1 10.7,2.4 12.7,2 13.6,4 15.6,4.6 15.5,6.7 17,8.2 15.9,9.9 16.5,12 14.7,13 14.3,15.1 12.2,15.2 10.9,16.9"/>' +
+          '<path d="M5.7 9.1 L7.8 11.2 L12.2 6.7" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>' +
         '</svg>' +
       '</span>' +
       '<span class="evo-card-badge__count">(' + fmtCount(count) + ' Reviews)</span>';
@@ -477,6 +465,20 @@
     return null;
   }
 
+  // Skip cards inside shoppable-video / carousel widgets (e.g. "Watch & Buy"),
+  // whose narrow layout clips the badge and makes it look broken.
+  function inBlockedZone(el) {
+    var n = el;
+    for (var i = 0; i < 8 && n; i++) {
+      var cls = (n.getAttribute && n.getAttribute("class")) || "";
+      if (/reel|shoppable|watch|tolstoy|videowise|vibe|story|swiper|slick|flickity|splide|glide|carousel|slider/i.test(cls)) return true;
+      // A <video> in a close ancestor means this is a shoppable-video card.
+      if (i < 4 && n.querySelector && n.querySelector("video")) return true;
+      n = n.parentElement;
+    }
+    return false;
+  }
+
   function injectCardBadges() {
     if (cfg.showCardBadges === false) return;
 
@@ -492,6 +494,7 @@
 
       var card = findStrictCard(link);
       if (!card) continue;
+      if (inBlockedZone(card)) continue;
       if (seenCards.has(card)) continue;
       if (card.querySelector("[data-evo-card-badge]")) {
         seenCards.add(card);

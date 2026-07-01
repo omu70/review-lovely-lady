@@ -10,7 +10,7 @@
 {% endcomment %}
 
 {%- assign shop_domain    = shop.permanent_domain -%}
-{%- assign api_base       = block.settings.api_base | default: 'https://reviews-app-shopify.vercel.app' -%}
+{%- assign api_base       = block.settings.api_base | default: 'https://review-lovely-lady.vercel.app' -%}
 {%- assign badge_target   = block.settings.badge_target | default: '.product__title, .product-single__title, [data-product-title], h1.product-title, h1' -%}
 {%- assign grid_target    = block.settings.grid_target  | default: '.product__description, .product-single__description, [data-product-description], main' -%}
 {%- assign show_badge     = block.settings.show_badge -%}
@@ -41,7 +41,7 @@
   "settings": [
     { "type": "header", "content": "App configuration" },
     { "type": "text", "id": "api_base", "label": "App API URL (Vercel)",
-      "default": "https://reviews-app-shopify.vercel.app",
+      "default": "https://review-lovely-lady.vercel.app",
       "info": "Where your Reviews app is hosted." },
 
     { "type": "header", "content": "Product page widgets" },

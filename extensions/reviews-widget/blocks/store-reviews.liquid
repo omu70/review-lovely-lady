@@ -7,7 +7,7 @@
 {% endcomment %}
 
 {%- assign shop_domain = shop.permanent_domain -%}
-{%- assign api_base    = block.settings.api_base | default: 'https://reviews-app-shopify.vercel.app' -%}
+{%- assign api_base    = block.settings.api_base | default: 'https://review-lovely-lady.vercel.app' -%}
 {%- assign heading     = block.settings.heading  | default: 'What our customers say' -%}
 
 <section
@@ -51,7 +51,7 @@
       "type": "text",
       "id": "api_base",
       "label": "App API URL",
-      "default": "https://reviews-app-shopify.vercel.app"
+      "default": "https://review-lovely-lady.vercel.app"
     },
     {
       "type": "text",

@@ -4,11 +4,12 @@
 // File location: /app/routes/app._index.jsx
 // =============================================================
 import { json } from "@remix-run/node";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useLoaderData, useFetcher, useRevalidator, Link } from "@remix-run/react";
 import {
   Page, Card, IndexTable, Text, Badge, Button, ButtonGroup, EmptyState,
   Layout, Banner, useIndexResourceState, Filters, ChoiceList, InlineStack, BlockStack, Box,
+  Modal, DropZone, Thumbnail, TextField,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -74,6 +75,46 @@ export const action = async ({ request }) => {
     if (error) return json({ ok: false, error: error.message }, { status: 500 });
     return json({ ok: true });
   }
+  if (intent === "set-images") {
+    const id = ids[0];
+    let keep = [];
+    try { keep = JSON.parse(form.get("keep") || "[]"); } catch { keep = []; }
+
+    // Upload any newly-added files to Supabase Storage
+    const uploaded = [];
+    const photos = form.getAll("photos");
+    for (const file of photos) {
+      if (typeof file === "string" || !file || !file.size) continue;
+      if (file.size > 5 * 1024 * 1024) continue; // skip >5MB
+      const safeName = (file.name || "img").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
+      const path = `${shop}/admin/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`;
+      try {
+        const buf = await file.arrayBuffer();
+        const { data, error: upErr } = await supabaseAdmin.storage
+          .from("review-images")
+          .upload(path, buf, { contentType: file.type || "image/jpeg", upsert: false });
+        if (!upErr && data) {
+          const { data: pub } = supabaseAdmin.storage.from("review-images").getPublicUrl(data.path);
+          if (pub?.publicUrl) uploaded.push(pub.publicUrl);
+        } else if (upErr) {
+          console.error("[admin image upload]", upErr);
+        }
+      } catch (e) { console.error("[admin image upload exception]", e); }
+    }
+
+    // Also accept pasted URLs (one per line or comma-separated)
+    const urlText = String(form.get("image_urls_text") || "").trim();
+    const pasted = urlText ? urlText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean) : [];
+
+    const finalUrls = [...keep, ...pasted, ...uploaded].slice(0, 10);
+    const { error } = await supabaseAdmin
+      .from("reviews")
+      .update({ image_urls: finalUrls })
+      .eq("id", id)
+      .eq("shop_domain", shop);
+    if (error) return json({ ok: false, error: error.message }, { status: 500 });
+    return json({ ok: true, image_urls: finalUrls });
+  }
   return json({ ok: false, error: "Unknown intent" }, { status: 400 });
 };
 
@@ -87,6 +128,40 @@ export default function AdminIndex() {
   const [statusFilter, setStatusFilter] = useState([]);
   const [sourceFilter, setSourceFilter] = useState([]);
   const [ratingFilter, setRatingFilter] = useState([]);
+
+  // ----- Photo manager modal -----
+  const [imgReview, setImgReview] = useState(null);
+  const [keepUrls, setKeepUrls] = useState([]);
+  const [newFiles, setNewFiles] = useState([]);
+  const [urlText, setUrlText] = useState("");
+  const [savingImgs, setSavingImgs] = useState(false);
+
+  const openImages = (r) => {
+    setImgReview(r);
+    setKeepUrls(r.image_urls || []);
+    setNewFiles([]);
+    setUrlText("");
+  };
+  const closeImages = () => { setImgReview(null); setSavingImgs(false); };
+
+  const saveImages = () => {
+    if (!imgReview) return;
+    const fd = new FormData();
+    fd.append("intent", "set-images");
+    fd.append("ids", JSON.stringify([imgReview.id]));
+    fd.append("keep", JSON.stringify(keepUrls));
+    fd.append("image_urls_text", urlText);
+    newFiles.forEach((f) => fd.append("photos", f));
+    setSavingImgs(true);
+    fetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
+  };
+
+  useEffect(() => {
+    if (savingImgs && fetcher.state === "idle" && fetcher.data) {
+      setSavingImgs(false);
+      if (fetcher.data.ok) { setImgReview(null); revalidator.revalidate(); }
+    }
+  }, [fetcher.state, fetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = useMemo(() => {
     return reviews.filter((r) => {
@@ -221,11 +296,11 @@ export default function AdminIndex() {
         </IndexTable.Cell>
 
         <IndexTable.Cell>
-          {r.image_urls?.length ? (
-            <Badge tone="info">{`${r.image_urls.length} photo${r.image_urls.length > 1 ? "s" : ""}`}</Badge>
-          ) : (
-            <Text as="span" variant="bodySm" tone="subdued">—</Text>
-          )}
+          <Button size="micro" variant="tertiary" onClick={() => openImages(r)}>
+            {r.image_urls?.length
+              ? `${r.image_urls.length} photo${r.image_urls.length > 1 ? "s" : ""}`
+              : "Add"}
+          </Button>
         </IndexTable.Cell>
 
         <IndexTable.Cell>
@@ -331,6 +406,75 @@ export default function AdminIndex() {
           </BlockStack>
         </Layout.Section>
       </Layout>
+
+      {imgReview ? (
+        <Modal
+          open
+          onClose={closeImages}
+          title={`Photos — ${imgReview.author_name}`}
+          primaryAction={{ content: "Save photos", onAction: saveImages, loading: savingImgs }}
+          secondaryActions={[{ content: "Cancel", onAction: closeImages }]}
+        >
+          <Modal.Section>
+            <BlockStack gap="400">
+              {keepUrls.length ? (
+                <BlockStack gap="200">
+                  <Text as="h3" variant="headingSm">Current photos</Text>
+                  <InlineStack gap="300" wrap>
+                    {keepUrls.map((u) => (
+                      <div key={u} style={{ textAlign: "center" }}>
+                        <Thumbnail size="large" alt="review photo" source={u} />
+                        <Button size="micro" variant="plain" tone="critical"
+                          onClick={() => setKeepUrls((prev) => prev.filter((x) => x !== u))}>
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </InlineStack>
+                </BlockStack>
+              ) : null}
+
+              <BlockStack gap="200">
+                <Text as="h3" variant="headingSm">Add photos</Text>
+                <DropZone accept="image/*" type="image"
+                  onDrop={(_files, accepted) => setNewFiles((prev) => [...prev, ...accepted])}>
+                  <DropZone.FileUpload actionTitle="Upload images" actionHint="PNG or JPG, up to ~4 MB each" />
+                </DropZone>
+                {newFiles.length ? (
+                  <InlineStack gap="300" wrap>
+                    {newFiles.map((f, i) => (
+                      <div key={i} style={{ textAlign: "center" }}>
+                        <Thumbnail size="large" alt={f.name}
+                          source={typeof window !== "undefined" ? window.URL.createObjectURL(f) : ""} />
+                        <Button size="micro" variant="plain" tone="critical"
+                          onClick={() => setNewFiles((prev) => prev.filter((_, idx) => idx !== i))}>
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </InlineStack>
+                ) : null}
+              </BlockStack>
+
+              <TextField
+                label="…or paste image URLs (one per line)"
+                value={urlText}
+                onChange={setUrlText}
+                multiline={3}
+                autoComplete="off"
+                placeholder="https://example.com/photo1.jpg"
+              />
+
+              {fetcher.data && fetcher.data.ok === false ? (
+                <Banner tone="critical"><p>{fetcher.data.error}</p></Banner>
+              ) : null}
+              <Text as="p" variant="bodySm" tone="subdued">
+                Up to 10 photos per review. Uploads are stored in your Supabase storage bucket.
+              </Text>
+            </BlockStack>
+          </Modal.Section>
+        </Modal>
+      ) : null}
     </Page>
   );
 }
