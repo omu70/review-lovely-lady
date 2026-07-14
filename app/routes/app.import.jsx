@@ -23,6 +23,13 @@ import { supabaseAdmin } from "../utils/supabase.server";
 // ------------------- Helpers -------------------
 const truthy = (v) => ["1", "true", "yes", "y", "on", "approved"].includes(String(v ?? "").trim().toLowerCase());
 
+// SKU group key = part of the SKU before the first space, lowercased.
+const groupKeyFromSku = (sku) => {
+  const s = String(sku == null ? "" : sku).trim();
+  if (!s) return null;
+  return s.split(/\s+/)[0].toLowerCase();
+};
+
 function parseDate(v) {
   if (!v) return null;
   const s = String(v).trim();
@@ -154,6 +161,10 @@ export const action = async ({ request }) => {
     const commented_at = parseDate(get("commented_at")) || null;
     const reply_at = parseDate(get("reply_at")) || null;
 
+    // Optional sku column → derive the SKU group so imports club automatically.
+    const sku = get("sku");
+    const group_key = groupKeyFromSku(sku);
+
     const record = {
       shop_domain: shop,
       product_id: product_id || null,
@@ -173,6 +184,7 @@ export const action = async ({ request }) => {
       reply_at,
       is_featured,
       item_type: get("item_type") || null,
+      group_key,
       status,
       source: "csv_import",
     };
@@ -272,6 +284,11 @@ export default function ImportPage() {
               For product reviews, add <strong>product_handle</strong> (from URL, e.g.
               {" "}<code>woodfire-pillar</code>) or <strong>product_id</strong>.
               {" "}<strong>Leave both empty for store-wide reviews</strong> shown on your homepage.
+            </Text>
+            <Text as="p" tone="subdued">
+              Optional <strong>sku</strong> column: reviews are clubbed across products that share the
+              same SKU base (the part before the first space, e.g. <code>KB-50119 BL-34</code> and
+              {" "}<code>KB-50119 OF-32</code> both map to group <code>kb-50119</code>).
             </Text>
             <Text as="p" tone="subdued">
               Optional: <strong>author_country</strong>, <strong>author_email</strong>,

@@ -15,6 +15,40 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../utils/supabase.server";
 
+// SKU group key = the part of the SKU before the first space, lowercased.
+//   "KB-50119 BL-34" -> "kb-50119"
+const groupKeyFromSku = (sku) => {
+  const s = String(sku == null ? "" : sku).trim();
+  if (!s) return null;
+  return s.split(/\s+/)[0].toLowerCase();
+};
+
+// Upload any files posted under the "photos" field to Supabase Storage and
+// return their public URLs. Shared by the single + bulk image actions.
+async function uploadPostedPhotos(form, shop) {
+  const uploaded = [];
+  const photos = form.getAll("photos");
+  for (const file of photos) {
+    if (typeof file === "string" || !file || !file.size) continue;
+    if (file.size > 5 * 1024 * 1024) continue; // skip >5MB
+    const safeName = (file.name || "img").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
+    const path = `${shop}/admin/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`;
+    try {
+      const buf = await file.arrayBuffer();
+      const { data, error: upErr } = await supabaseAdmin.storage
+        .from("review-images")
+        .upload(path, buf, { contentType: file.type || "image/jpeg", upsert: false });
+      if (!upErr && data) {
+        const { data: pub } = supabaseAdmin.storage.from("review-images").getPublicUrl(data.path);
+        if (pub?.publicUrl) uploaded.push(pub.publicUrl);
+      } else if (upErr) {
+        console.error("[admin image upload]", upErr);
+      }
+    } catch (e) { console.error("[admin image upload exception]", e); }
+  }
+  return uploaded;
+}
+
 // ---------------- Loader ----------------
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -23,7 +57,7 @@ export const loader = async ({ request }) => {
   const [reviewsRes, shopRes] = await Promise.all([
     supabaseAdmin
       .from("reviews")
-      .select("id, product_id, product_handle, title, author_name, author_location, rating, content, status, source, image_urls, created_at")
+      .select("id, product_id, product_handle, group_key, title, author_name, author_location, rating, content, status, source, image_urls, created_at")
       .eq("shop_domain", shop)
       .order("created_at", { ascending: false })
       .limit(500),
@@ -40,10 +74,85 @@ export const loader = async ({ request }) => {
 
 // ---------------- Action ----------------
 export const action = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
   const form = await request.formData();
   const intent = form.get("intent");
+
+  // ---- Sync product groups from the Shopify catalogue (no row selection) ----
+  // Reads every product + its first variant SKU and records the SKU group so
+  // the storefront can club reviews across products that share a SKU base.
+  if (intent === "sync-groups") {
+    const rows = [];
+    let cursor = null, hasNext = true, pages = 0;
+    try {
+      while (hasNext && pages < 100) {
+        const resp = await admin.graphql(
+          `#graphql
+          query ProductGroups($cursor: String) {
+            products(first: 100, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              edges { node { id handle variants(first: 1) { edges { node { sku } } } } }
+            }
+          }`,
+          { variables: { cursor } }
+        );
+        const payload = await resp.json();
+        const conn = payload?.data?.products;
+        if (!conn) break;
+        for (const edge of conn.edges || []) {
+          const n = edge.node;
+          const numericId = String(n.id).split("/").pop();
+          const sku = n.variants?.edges?.[0]?.node?.sku || null;
+          rows.push({
+            shop_domain: shop,
+            product_id: numericId,
+            product_handle: n.handle,
+            sku,
+            group_key: groupKeyFromSku(sku),
+            updated_at: new Date().toISOString(),
+          });
+        }
+        hasNext = conn.pageInfo?.hasNextPage;
+        cursor = conn.pageInfo?.endCursor;
+        pages++;
+      }
+    } catch (e) {
+      console.error("[sync-groups]", e);
+      return json({ ok: false, error: "Could not read products from Shopify" }, { status: 500 });
+    }
+
+    if (rows.length) {
+      const { error } = await supabaseAdmin
+        .from("product_groups")
+        .upsert(rows, { onConflict: "shop_domain,product_id" });
+      if (error) return json({ ok: false, error: error.message }, { status: 500 });
+
+      // Backfill group_key onto existing reviews so grouping also speeds up the
+      // storefront and works even before product_groups is fully populated.
+      const byKey = {};
+      for (const r of rows) {
+        if (!r.group_key) continue;
+        if (r.product_handle) byKey[r.product_handle] = r.group_key;
+        if (r.product_id) byKey[r.product_id] = r.group_key;
+      }
+      const groupKeys = Array.from(new Set(rows.map((r) => r.group_key).filter(Boolean)));
+      for (const gk of groupKeys) {
+        const handles = rows.filter((r) => r.group_key === gk).map((r) => r.product_handle).filter(Boolean);
+        const gids = rows.filter((r) => r.group_key === gk).map((r) => r.product_id).filter(Boolean);
+        const keys = Array.from(new Set([...handles, ...gids]));
+        if (!keys.length) continue;
+        await supabaseAdmin.from("reviews").update({ group_key: gk })
+          .eq("shop_domain", shop).in("product_handle", keys);
+        await supabaseAdmin.from("reviews").update({ group_key: gk })
+          .eq("shop_domain", shop).in("product_id", keys);
+      }
+    }
+
+    const groups = new Set(rows.map((r) => r.group_key).filter(Boolean));
+    return json({ ok: true, synced: rows.length, groups: groups.size, intent: "sync-groups" });
+  }
+
   const ids = JSON.parse(form.get("ids") || "[]");
 
   if (!ids.length) return json({ ok: false, error: "No rows selected" }, { status: 400 });
@@ -81,26 +190,7 @@ export const action = async ({ request }) => {
     try { keep = JSON.parse(form.get("keep") || "[]"); } catch { keep = []; }
 
     // Upload any newly-added files to Supabase Storage
-    const uploaded = [];
-    const photos = form.getAll("photos");
-    for (const file of photos) {
-      if (typeof file === "string" || !file || !file.size) continue;
-      if (file.size > 5 * 1024 * 1024) continue; // skip >5MB
-      const safeName = (file.name || "img").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80);
-      const path = `${shop}/admin/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`;
-      try {
-        const buf = await file.arrayBuffer();
-        const { data, error: upErr } = await supabaseAdmin.storage
-          .from("review-images")
-          .upload(path, buf, { contentType: file.type || "image/jpeg", upsert: false });
-        if (!upErr && data) {
-          const { data: pub } = supabaseAdmin.storage.from("review-images").getPublicUrl(data.path);
-          if (pub?.publicUrl) uploaded.push(pub.publicUrl);
-        } else if (upErr) {
-          console.error("[admin image upload]", upErr);
-        }
-      } catch (e) { console.error("[admin image upload exception]", e); }
-    }
+    const uploaded = await uploadPostedPhotos(form, shop);
 
     // Also accept pasted URLs (one per line or comma-separated)
     const urlText = String(form.get("image_urls_text") || "").trim();
@@ -115,6 +205,38 @@ export const action = async ({ request }) => {
     if (error) return json({ ok: false, error: error.message }, { status: 500 });
     return json({ ok: true, image_urls: finalUrls });
   }
+
+  // ---- Bulk: APPEND the same images to every selected review ----
+  // Lets you attach one set of photos to a whole set of reviews at once
+  // (e.g. select all reviews for a product group, then add product photos).
+  if (intent === "bulk-add-images") {
+    const uploaded = await uploadPostedPhotos(form, shop);
+    const urlText = String(form.get("image_urls_text") || "").trim();
+    const pasted = urlText ? urlText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean) : [];
+    const toAdd = [...pasted, ...uploaded];
+    if (!toAdd.length) {
+      return json({ ok: false, error: "Add at least one photo or image URL" }, { status: 400 });
+    }
+
+    const { data: rows, error: selErr } = await supabaseAdmin
+      .from("reviews")
+      .select("id, image_urls")
+      .in("id", ids)
+      .eq("shop_domain", shop);
+    if (selErr) return json({ ok: false, error: selErr.message }, { status: 500 });
+
+    for (const row of rows || []) {
+      const merged = [...(row.image_urls || []), ...toAdd].slice(0, 10);
+      const { error: upErr } = await supabaseAdmin
+        .from("reviews")
+        .update({ image_urls: merged })
+        .eq("id", row.id)
+        .eq("shop_domain", shop);
+      if (upErr) return json({ ok: false, error: upErr.message }, { status: 500 });
+    }
+    return json({ ok: true, count: rows?.length || 0, intent: "bulk-add-images" });
+  }
+
   return json({ ok: false, error: "Unknown intent" }, { status: 400 });
 };
 
@@ -129,27 +251,45 @@ export default function AdminIndex() {
   const [sourceFilter, setSourceFilter] = useState([]);
   const [ratingFilter, setRatingFilter] = useState([]);
 
-  // ----- Photo manager modal -----
-  const [imgReview, setImgReview] = useState(null);
+  // ----- Photo manager modal (single review OR bulk set) -----
+  const [imgReview, setImgReview] = useState(null); // the review being edited, or null in bulk mode
+  const [bulkImgOpen, setBulkImgOpen] = useState(false);
+  const [bulkImgCount, setBulkImgCount] = useState(0);
   const [keepUrls, setKeepUrls] = useState([]);
   const [newFiles, setNewFiles] = useState([]);
   const [urlText, setUrlText] = useState("");
   const [savingImgs, setSavingImgs] = useState(false);
 
+  const modalOpen = Boolean(imgReview) || bulkImgOpen;
+
   const openImages = (r) => {
+    setBulkImgOpen(false);
     setImgReview(r);
     setKeepUrls(r.image_urls || []);
     setNewFiles([]);
     setUrlText("");
   };
-  const closeImages = () => { setImgReview(null); setSavingImgs(false); };
+  const closeImages = () => { setImgReview(null); setBulkImgOpen(false); setSavingImgs(false); };
+
+  // ----- Sync product groups -----
+  const [syncing, setSyncing] = useState(false);
+  const syncGroups = () => {
+    setSyncing(true);
+    fetcher.submit({ intent: "sync-groups" }, { method: "post" });
+  };
 
   const saveImages = () => {
-    if (!imgReview) return;
     const fd = new FormData();
-    fd.append("intent", "set-images");
-    fd.append("ids", JSON.stringify([imgReview.id]));
-    fd.append("keep", JSON.stringify(keepUrls));
+    if (bulkImgOpen) {
+      // Append the same photos to every selected review.
+      fd.append("intent", "bulk-add-images");
+      fd.append("ids", JSON.stringify(selectedResources));
+    } else {
+      if (!imgReview) return;
+      fd.append("intent", "set-images");
+      fd.append("ids", JSON.stringify([imgReview.id]));
+      fd.append("keep", JSON.stringify(keepUrls));
+    }
     fd.append("image_urls_text", urlText);
     newFiles.forEach((f) => fd.append("photos", f));
     setSavingImgs(true);
@@ -157,9 +297,14 @@ export default function AdminIndex() {
   };
 
   useEffect(() => {
-    if (savingImgs && fetcher.state === "idle" && fetcher.data) {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if (savingImgs) {
       setSavingImgs(false);
-      if (fetcher.data.ok) { setImgReview(null); revalidator.revalidate(); }
+      if (fetcher.data.ok) { closeImages(); clearSelection(); revalidator.revalidate(); }
+    }
+    if (syncing && (fetcher.data.intent === "sync-groups" || fetcher.data.synced != null)) {
+      setSyncing(false);
+      if (fetcher.data.ok) revalidator.revalidate();
     }
   }, [fetcher.state, fetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -189,6 +334,15 @@ export default function AdminIndex() {
   const bulk = (intent) =>
     submitMutation({ intent, ids: JSON.stringify(selectedResources) });
 
+  const openBulkImages = () => {
+    setImgReview(null);
+    setBulkImgCount(selectedResources.length);
+    setBulkImgOpen(true);
+    setKeepUrls([]);
+    setNewFiles([]);
+    setUrlText("");
+  };
+
   const onToggle = (id, current) =>
     submitMutation({ intent: "single-toggle", ids: JSON.stringify([id]), next: current === "approved" ? "hidden" : "approved" });
   const onDelete = (id) =>
@@ -200,6 +354,7 @@ export default function AdminIndex() {
   const promotedBulkActions = [
     { content: "Approve", onAction: () => bulk("approve") },
     { content: "Hide", onAction: () => bulk("hide") },
+    { content: "Add images", onAction: openBulkImages },
     { content: "Delete", onAction: () => bulk("delete"), destructive: true },
   ];
 
@@ -260,9 +415,16 @@ export default function AdminIndex() {
           {isStoreWide ? (
             <Badge tone="info">Store-wide</Badge>
           ) : (
-            <div style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              <Text as="span" variant="bodySm" tone="subdued">{productLabel}</Text>
-            </div>
+            <BlockStack gap="050">
+              <div style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <Text as="span" variant="bodySm" tone="subdued">{productLabel}</Text>
+              </div>
+              {r.group_key ? (
+                <div style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <Text as="span" variant="bodySm" tone="subdued">Group: {r.group_key}</Text>
+                </div>
+              ) : null}
+            </BlockStack>
           )}
         </IndexTable.Cell>
 
@@ -331,6 +493,9 @@ export default function AdminIndex() {
       title="Reviews"
       subtitle={reviews.length > 0 ? `${reviews.length} total review${reviews.length === 1 ? "" : "s"}` : undefined}
       primaryAction={{ content: "Import CSV", url: "/app/import" }}
+      secondaryActions={[
+        { content: syncing ? "Syncing…" : "Sync product groups", onAction: syncGroups, loading: syncing },
+      ]}
     >
       <TitleBar title="Reviews" />
       <Layout>
@@ -338,6 +503,18 @@ export default function AdminIndex() {
           <Layout.Section>
             <Banner tone="success" title="You're on the Early Adopter (free) plan 🎉">
               <p>Thanks for being one of our first 50 stores. All features are included at no cost.</p>
+            </Banner>
+          </Layout.Section>
+        ) : null}
+
+        {fetcher.data && fetcher.data.intent === "sync-groups" && fetcher.data.ok ? (
+          <Layout.Section>
+            <Banner tone="success" title="Product groups synced" onDismiss={() => {}}>
+              <p>
+                Matched {fetcher.data.synced} product{fetcher.data.synced === 1 ? "" : "s"} into{" "}
+                {fetcher.data.groups} SKU group{fetcher.data.groups === 1 ? "" : "s"}. Reviews are now
+                clubbed across products that share a SKU base.
+              </p>
             </Banner>
           </Layout.Section>
         ) : null}
@@ -407,17 +584,30 @@ export default function AdminIndex() {
         </Layout.Section>
       </Layout>
 
-      {imgReview ? (
+      {modalOpen ? (
         <Modal
           open
           onClose={closeImages}
-          title={`Photos — ${imgReview.author_name}`}
-          primaryAction={{ content: "Save photos", onAction: saveImages, loading: savingImgs }}
+          title={bulkImgOpen
+            ? `Add photos to ${bulkImgCount} review${bulkImgCount === 1 ? "" : "s"}`
+            : `Photos — ${imgReview?.author_name}`}
+          primaryAction={{
+            content: bulkImgOpen ? "Add to selected" : "Save photos",
+            onAction: saveImages,
+            loading: savingImgs,
+          }}
           secondaryActions={[{ content: "Cancel", onAction: closeImages }]}
         >
           <Modal.Section>
             <BlockStack gap="400">
-              {keepUrls.length ? (
+              {bulkImgOpen ? (
+                <Banner tone="info">
+                  <p>These photos will be <strong>added</strong> to all {bulkImgCount} selected review
+                  {bulkImgCount === 1 ? "" : "s"} (existing photos are kept).</p>
+                </Banner>
+              ) : null}
+
+              {!bulkImgOpen && keepUrls.length ? (
                 <BlockStack gap="200">
                   <Text as="h3" variant="headingSm">Current photos</Text>
                   <InlineStack gap="300" wrap>
@@ -470,6 +660,7 @@ export default function AdminIndex() {
               ) : null}
               <Text as="p" variant="bodySm" tone="subdued">
                 Up to 10 photos per review. Uploads are stored in your Supabase storage bucket.
+                {bulkImgOpen ? " Tip: filter to one product group, select all, then add shared photos." : ""}
               </Text>
             </BlockStack>
           </Modal.Section>

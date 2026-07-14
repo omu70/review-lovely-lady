@@ -155,6 +155,7 @@ export const loader = async ({ request }) => {
   const shop = url.searchParams.get("shop");
   const productId = url.searchParams.get("productId");
   const productHandle = url.searchParams.get("productHandle");
+  const groupKeyParam = (url.searchParams.get("groupKey") || "").trim().toLowerCase() || null;
   const storeOnly = url.searchParams.get("store") === "true";
   const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10));
   const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "12", 10)));
@@ -209,18 +210,69 @@ export const loader = async ({ request }) => {
     });
   }
 
-  // Product page mode: merge product-specific FIRST, then store-wide
+  // ---------------------------------------------------------------
+  // Product page mode — CLUB reviews across the whole SKU group.
+  //
+  // Products whose SKU shares the same base code (the part before the
+  // first space, e.g. "KB-50119") share ONE pool of reviews. We resolve
+  // the current product's group, gather every sibling product's handle/id,
+  // and return the combined pool with a single shared average.
+  // ---------------------------------------------------------------
   const productKey = productHandle || productId;
 
-  // Fetch ALL product-specific reviews + ALL store-wide (we'll merge + paginate)
-  const productPromise = supabaseAdmin
-    .from("reviews")
-    .select(SELECT_COLS)
-    .eq("shop_domain", shop)
-    .eq("status", "approved")
-    .or(`product_handle.eq.${productKey},product_id.eq.${productKey}`)
-    .order("is_featured", { ascending: false })
-    .order("created_at", { ascending: false });
+  // Keys we will match reviews against (this product + all siblings in its group).
+  const matchKeys = new Set();
+  if (productHandle) matchKeys.add(productHandle);
+  if (productId) matchKeys.add(productId);
+
+  // 1) Figure out this product's group_key.
+  let groupKey = groupKeyParam;
+  if (!groupKey && productKey) {
+    // interpolation-safe: productKey is a slug or numeric id (no dots/commas)
+    const meRes = await supabaseAdmin
+      .from("product_groups")
+      .select("group_key")
+      .eq("shop_domain", shop)
+      .or(`product_handle.eq.${productKey},product_id.eq.${productKey}`)
+      .not("group_key", "is", null)
+      .limit(1);
+    groupKey = meRes.data?.[0]?.group_key || null;
+  }
+
+  // 2) Pull in every sibling product that belongs to the same group.
+  if (groupKey) {
+    const sibRes = await supabaseAdmin
+      .from("product_groups")
+      .select("product_handle, product_id")
+      .eq("shop_domain", shop)
+      .eq("group_key", groupKey);
+    for (const row of sibRes.data || []) {
+      if (row.product_handle) matchKeys.add(row.product_handle);
+      if (row.product_id) matchKeys.add(row.product_id);
+    }
+  }
+
+  const keyList = Array.from(matchKeys);
+
+  // 3) Fetch the group's reviews. We match a review if its handle OR its id
+  //    is one of the group's keys, OR it was tagged directly with group_key.
+  const groupQueries = [];
+  if (keyList.length) {
+    groupQueries.push(
+      supabaseAdmin.from("reviews").select(SELECT_COLS)
+        .eq("shop_domain", shop).eq("status", "approved").in("product_handle", keyList)
+    );
+    groupQueries.push(
+      supabaseAdmin.from("reviews").select(SELECT_COLS)
+        .eq("shop_domain", shop).eq("status", "approved").in("product_id", keyList)
+    );
+  }
+  if (groupKey) {
+    groupQueries.push(
+      supabaseAdmin.from("reviews").select(SELECT_COLS)
+        .eq("shop_domain", shop).eq("status", "approved").eq("group_key", groupKey)
+    );
+  }
 
   const storePromise = supabaseAdmin
     .from("reviews")
@@ -232,26 +284,43 @@ export const loader = async ({ request }) => {
     .order("is_featured", { ascending: false })
     .order("created_at", { ascending: false });
 
-  const [prodRes, storeRes] = await Promise.all([productPromise, storePromise]);
-  if (prodRes.error || storeRes.error) {
-    console.error("[api.reviews]", prodRes.error || storeRes.error);
+  const [groupResults, storeRes] = await Promise.all([
+    Promise.all(groupQueries),
+    storePromise,
+  ]);
+
+  const anyGroupErr = groupResults.find((r) => r.error);
+  if (anyGroupErr?.error || storeRes.error) {
+    console.error("[api.reviews]", anyGroupErr?.error || storeRes.error);
     return respond({ error: "DB error" }, { status: 500 });
   }
 
-  const productRows = prodRes.data || [];
-  const storeRows = storeRes.data || [];
-  // Combined: product-specific reviews first (top of feed), then store-wide
-  const combined = productRows.concat(storeRows);
+  // Merge + de-duplicate the group reviews (the same row can come back from
+  // more than one of the queries above).
+  const seen = new Set();
+  const productRows = [];
+  for (const res of groupResults) {
+    for (const r of res.data || []) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      productRows.push(r);
+    }
+  }
+  // Featured first, then newest first.
+  productRows.sort((a, b) => {
+    const f = (b.is_featured ? 1 : 0) - (a.is_featured ? 1 : 0);
+    if (f !== 0) return f;
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
 
-  // Total review count = product-specific + store-wide combined (~150 per product)
+  const storeRows = storeRes.data || [];
+  // Combined: group reviews first (top of feed), then store-wide.
+  const combined = productRows.concat(storeRows);
   const total = combined.length;
 
-  // BUT the displayed average is computed from PRODUCT-SPECIFIC reviews only.
-  // This way each product gets its own unique star rating (varies 4.2-4.8)
-  // instead of every product averaging towards the common store-wide mean.
-  const productOnly = productRows;
-  const totalRatings = productOnly.length || total; // fallback if no product-specific
-  const baseList = productOnly.length ? productOnly : combined;
+  // Average is computed from the GROUP's reviews so every product in the same
+  // SKU group shows the same rating (fallback to combined if the group is empty).
+  const baseList = productRows.length ? productRows : combined;
   const average = baseList.length === 0 ? 0
     : Number((baseList.reduce((s, r) => s + r.rating, 0) / baseList.length).toFixed(1));
 
@@ -262,5 +331,6 @@ export const loader = async ({ request }) => {
     page, limit, total,
     totalPages: Math.max(1, Math.ceil(total / limit)),
     average, totalRatings: total, // show combined count in "(N Reviews)" badge
+    groupKey,                     // handy for debugging / storefront cache keys
   });
 };

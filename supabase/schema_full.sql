@@ -68,6 +68,8 @@ alter table public.reviews add column if not exists item_type       text;
 alter table public.reviews add column if not exists image_urls      text[] not null default '{}';
 alter table public.reviews add column if not exists video_url       text;
 alter table public.reviews add column if not exists source          text not null default 'storefront';
+-- SKU grouping (migration 006): reviews can carry the SKU group directly.
+alter table public.reviews add column if not exists group_key       text;
 
 alter table public.reviews drop constraint if exists reviews_source_check;
 alter table public.reviews
@@ -87,6 +89,8 @@ create index if not exists idx_reviews_is_featured     on public.reviews (is_fea
 create index if not exists idx_reviews_store_wide
   on public.reviews (shop_domain, status)
   where product_id is null and product_handle is null;
+create index if not exists idx_reviews_group_key
+  on public.reviews (shop_domain, group_key);
 
 -- -------------------------------------------------------------
 -- 3) shopify_sessions — used by the app to keep you logged in
@@ -100,6 +104,25 @@ create table if not exists public.shopify_sessions (
 create index if not exists idx_shopify_sessions_shop on public.shopify_sessions (shop);
 
 -- -------------------------------------------------------------
+-- 3b) product_groups — maps each product to its SKU group so that
+--     products sharing the same SKU base (e.g. "KB-50119") share
+--     one pool of reviews. Filled by "Sync product groups" in admin.
+-- -------------------------------------------------------------
+create table if not exists public.product_groups (
+  shop_domain    text        not null references public.shops(shop_domain) on delete cascade,
+  product_id     text        not null,
+  product_handle text,
+  sku            text,
+  group_key      text,
+  updated_at     timestamptz not null default now(),
+  primary key (shop_domain, product_id)
+);
+create index if not exists idx_product_groups_group
+  on public.product_groups (shop_domain, group_key);
+create index if not exists idx_product_groups_handle
+  on public.product_groups (shop_domain, product_handle);
+
+-- -------------------------------------------------------------
 -- 4) Row Level Security
 --    (the app uses the service-role key on the server, which
 --     bypasses RLS — these policies only govern public access)
@@ -107,6 +130,7 @@ create index if not exists idx_shopify_sessions_shop on public.shopify_sessions 
 alter table public.shops            enable row level security;
 alter table public.reviews          enable row level security;
 alter table public.shopify_sessions enable row level security;
+alter table public.product_groups   enable row level security;
 
 drop policy if exists "Public read approved reviews" on public.reviews;
 create policy "Public read approved reviews"

@@ -13,6 +13,15 @@
   // We prefer handle since CSV imports use handle; fall back to id.
   var productKey = cfg.productHandle || cfg.productId;
 
+  // SKU grouping: products whose SKU shares the same base code (the part
+  // before the first space, e.g. "KB-50119") share one pool of reviews.
+  function groupKeyFromSku(sku) {
+    var s = String(sku == null ? "" : sku).trim();
+    if (!s) return "";
+    return s.split(/\s+/)[0].toLowerCase();
+  }
+  var groupKey = groupKeyFromSku(cfg.productSku);
+
   // Compact count: 920 → "920", 1234 → "1.2K", 12345 → "12K", 1.5M → "1.5M"
   function fmtCount(n) {
     n = Number(n) || 0;
@@ -71,7 +80,9 @@
     // Live aggregate (prefer handle for matching imported reviews)
     fetch(apiBase + "/api/reviews?shop=" + encodeURIComponent(cfg.shop) +
           "&productHandle=" + encodeURIComponent(productKey) +
-          "&productId=" + encodeURIComponent(cfg.productId) + "&page=1&limit=1")
+          "&productId=" + encodeURIComponent(cfg.productId) +
+          (groupKey ? "&groupKey=" + encodeURIComponent(groupKey) : "") +
+          "&page=1&limit=1")
       .then(function (r) { return r.json(); })
       .then(function (d) {
         wrap.querySelector("[data-evo-avg]").textContent   = (d.average || 0).toFixed(1);
@@ -94,6 +105,7 @@
     section.dataset.shop = cfg.shop;
     section.dataset.productId = cfg.productId;
     section.dataset.productHandle = cfg.productHandle || "";
+    section.dataset.groupKey = groupKey || "";
     section.dataset.api = apiBase;
     section.dataset.page = "1";
     section.dataset.limit = "12";
@@ -153,6 +165,8 @@
     if (!apiBase || /reviews-app-shopify\.vercel\.app/.test(apiBase)) apiBase = "https://review-lovely-lady.vercel.app";
     var shop = root.dataset.shop;
     var productId = root.dataset.productId;
+    var productHandle = root.dataset.productHandle || "";
+    var groupKey = root.dataset.groupKey || "";
     var isStoreMode = root.dataset.store === "true";
     var limit = parseInt(root.dataset.limit || "12", 10);
 
@@ -286,8 +300,13 @@
     function load(page) {
       grid.innerHTML = '<div class="evo-rw__empty">Loading reviews…</div>';
       var qs = "shop=" + encodeURIComponent(shop) + "&page=" + page + "&limit=" + limit;
-      if (isStoreMode) qs += "&store=true";
-      else             qs += "&productId=" + encodeURIComponent(productId);
+      if (isStoreMode) {
+        qs += "&store=true";
+      } else {
+        qs += "&productId=" + encodeURIComponent(productId);
+        if (productHandle) qs += "&productHandle=" + encodeURIComponent(productHandle);
+        if (groupKey)      qs += "&groupKey=" + encodeURIComponent(groupKey);
+      }
       fetch(apiBase + "/api/reviews?" + qs)
         .then(function (r) { return r.json(); })
         .then(function (d) {

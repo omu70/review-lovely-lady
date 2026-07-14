@@ -17,11 +17,17 @@
 {%- assign show_grid      = block.settings.show_grid -%}
 {%- assign show_card_badges = block.settings.show_card_badges -%}
 
+{%- assign product_sku = '' -%}
+{%- if product and product.selected_or_first_available_variant -%}
+  {%- assign product_sku = product.selected_or_first_available_variant.sku -%}
+{%- endif -%}
+
 <script>
   window.__EVO_REVIEWS__ = {
     shop:           {{ shop_domain | json }},
     productId:      {% if product %}{{ product.id | json }}{% else %}null{% endif %},
     productHandle:  {% if product %}{{ product.handle | json }}{% else %}null{% endif %},
+    productSku:     {{ product_sku | json }},
     apiBase:        {{ api_base | json }},
     badgeTarget:    {{ badge_target | json }},
     gridTarget:     {{ grid_target | json }},
