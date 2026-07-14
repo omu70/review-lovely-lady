@@ -153,6 +153,74 @@ export const action = async ({ request }) => {
     return json({ ok: true, synced: rows.length, groups: groups.size, intent: "sync-groups" });
   }
 
+  // ---- Find duplicate reviews (dry run — returns ids to delete) ----
+  // Two reviews are "duplicates" when the same person left the same text, with
+  // the same rating, on the same product. We keep ONE of each set (preferring a
+  // copy that has photos, otherwise the oldest) and report the rest.
+  if (intent === "find-duplicates" || intent === "delete-duplicates") {
+    // Pull every review for the shop (paged, since there can be thousands).
+    const all = [];
+    const PAGE = 1000;
+    for (let start = 0; ; start += PAGE) {
+      const { data, error } = await supabaseAdmin
+        .from("reviews")
+        .select("id, author_name, content, rating, product_handle, product_id, image_urls, created_at")
+        .eq("shop_domain", shop)
+        .order("created_at", { ascending: true })
+        .range(start, start + PAGE - 1);
+      if (error) return json({ ok: false, error: error.message }, { status: 500 });
+      all.push(...(data || []));
+      if (!data || data.length < PAGE) break;
+    }
+
+    const norm = (s) => String(s == null ? "" : s).trim().toLowerCase().replace(/\s+/g, " ");
+    const groupsMap = new Map();
+    for (const r of all) {
+      const key = [
+        norm(r.author_name),
+        norm(r.content),
+        String(r.rating),
+        norm(r.product_handle),
+        norm(r.product_id),
+      ].join("␟");
+      if (!groupsMap.has(key)) groupsMap.set(key, []);
+      groupsMap.get(key).push(r);
+    }
+
+    const dupIds = [];
+    let dupSets = 0;
+    for (const rows of groupsMap.values()) {
+      if (rows.length < 2) continue;
+      dupSets++;
+      // Keeper = prefers a copy WITH photos, else the oldest (rows are
+      // already ordered oldest-first, so it's a stable choice).
+      rows.sort((a, b) => {
+        const ai = (a.image_urls?.length ? 1 : 0);
+        const bi = (b.image_urls?.length ? 1 : 0);
+        if (bi !== ai) return bi - ai;
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      });
+      for (let i = 1; i < rows.length; i++) dupIds.push(rows[i].id);
+    }
+
+    if (intent === "find-duplicates") {
+      return json({ ok: true, intent: "find-duplicates", dupIds, dupCount: dupIds.length, dupSets });
+    }
+
+    // delete-duplicates: delete exactly the ids we computed here (re-computed
+    // server-side so a stale client can't ask us to delete the wrong rows).
+    if (!dupIds.length) {
+      return json({ ok: true, intent: "delete-duplicates", deleted: 0 });
+    }
+    for (let i = 0; i < dupIds.length; i += 200) {
+      const chunk = dupIds.slice(i, i + 200);
+      const { error } = await supabaseAdmin
+        .from("reviews").delete().in("id", chunk).eq("shop_domain", shop);
+      if (error) return json({ ok: false, error: error.message }, { status: 500 });
+    }
+    return json({ ok: true, intent: "delete-duplicates", deleted: dupIds.length });
+  }
+
   const ids = JSON.parse(form.get("ids") || "[]");
 
   if (!ids.length) return json({ ok: false, error: "No rows selected" }, { status: 400 });
@@ -244,6 +312,7 @@ export const action = async ({ request }) => {
 export default function AdminIndex() {
   const { reviews, plan, error } = useLoaderData();
   const fetcher = useFetcher();
+  const dupeFetcher = useFetcher();
   const revalidator = useRevalidator();
 
   const [query, setQuery] = useState("");
@@ -277,6 +346,25 @@ export default function AdminIndex() {
     setSyncing(true);
     fetcher.submit({ intent: "sync-groups" }, { method: "post" });
   };
+
+  // ----- Delete duplicate reviews (scan → confirm → delete) -----
+  const [dupModal, setDupModal] = useState(false);
+  const scanning = dupeFetcher.state !== "idle" && dupeFetcher.formData?.get("intent") === "find-duplicates";
+  const deletingDupes = dupeFetcher.state !== "idle" && dupeFetcher.formData?.get("intent") === "delete-duplicates";
+  const dupData = dupeFetcher.data;
+
+  const scanDuplicates = () => dupeFetcher.submit({ intent: "find-duplicates" }, { method: "post" });
+  const confirmDeleteDuplicates = () => dupeFetcher.submit({ intent: "delete-duplicates" }, { method: "post" });
+
+  useEffect(() => {
+    if (dupeFetcher.state !== "idle" || !dupeFetcher.data) return;
+    if (dupeFetcher.data.intent === "find-duplicates") {
+      setDupModal(true);
+    } else if (dupeFetcher.data.intent === "delete-duplicates") {
+      setDupModal(false);
+      revalidator.revalidate();
+    }
+  }, [dupeFetcher.state, dupeFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveImages = () => {
     const fd = new FormData();
@@ -495,6 +583,7 @@ export default function AdminIndex() {
       primaryAction={{ content: "Import CSV", url: "/app/import" }}
       secondaryActions={[
         { content: syncing ? "Syncing…" : "Sync product groups", onAction: syncGroups, loading: syncing },
+        { content: scanning ? "Scanning…" : "Delete duplicates", onAction: scanDuplicates, loading: scanning },
       ]}
     >
       <TitleBar title="Reviews" />
@@ -663,6 +752,44 @@ export default function AdminIndex() {
                 {bulkImgOpen ? " Tip: filter to one product group, select all, then add shared photos." : ""}
               </Text>
             </BlockStack>
+          </Modal.Section>
+        </Modal>
+      ) : null}
+
+      {dupModal ? (
+        <Modal
+          open
+          onClose={() => setDupModal(false)}
+          title="Delete duplicate reviews"
+          primaryAction={
+            dupData?.dupCount
+              ? {
+                  content: `Delete ${dupData.dupCount} duplicate${dupData.dupCount === 1 ? "" : "s"}`,
+                  destructive: true,
+                  onAction: confirmDeleteDuplicates,
+                  loading: deletingDupes,
+                }
+              : undefined
+          }
+          secondaryActions={[{ content: dupData?.dupCount ? "Cancel" : "Close", onAction: () => setDupModal(false) }]}
+        >
+          <Modal.Section>
+            {dupData?.dupCount ? (
+              <BlockStack gap="300">
+                <Text as="p">
+                  Found <strong>{dupData.dupCount}</strong> duplicate review
+                  {dupData.dupCount === 1 ? "" : "s"} across <strong>{dupData.dupSets}</strong> set
+                  {dupData.dupSets === 1 ? "" : "s"}.
+                </Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  A duplicate is the same reviewer, same text, same rating, on the same product.
+                  One copy of each set is kept (the one with photos, otherwise the oldest) and the
+                  rest are deleted. This can't be undone.
+                </Text>
+              </BlockStack>
+            ) : (
+              <Text as="p">No duplicate reviews found. 🎉</Text>
+            )}
           </Modal.Section>
         </Modal>
       ) : null}
