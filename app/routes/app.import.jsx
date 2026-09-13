@@ -205,10 +205,52 @@ export const action = async ({ request }) => {
     return json({ ok: false, error: "No valid rows", errors }, { status: 400 });
   }
 
-  const { error } = await supabaseAdmin.from("reviews").insert(records);
-  if (error) return json({ ok: false, error: error.message }, { status: 500 });
+  // ---------------------------------------------------------------
+  // Skip rows that are already in the database (and duplicates inside
+  // this same file), so re-uploading a CSV can't create a second copy.
+  // Match = same product + same reviewer + same review text.
+  // ---------------------------------------------------------------
+  const dupKey = (r) =>
+    [
+      String(r.product_handle || r.product_id || "__store__").trim().toLowerCase(),
+      String(r.author_name || "").trim().toLowerCase(),
+      String(r.content || "").replace(/\s+/g, " ").trim().toLowerCase(),
+    ].join("||");
 
-  return json({ ok: true, inserted: records.length, errors });
+  const seen = new Set();
+  const PAGE_SIZE = 1000;
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error: exErr } = await supabaseAdmin
+      .from("reviews")
+      .select("product_id, product_handle, author_name, content")
+      .eq("shop_domain", shop)
+      .range(from, from + PAGE_SIZE - 1);
+    if (exErr) return json({ ok: false, error: exErr.message }, { status: 500 });
+    if (!data || data.length === 0) break;
+    for (const row of data) seen.add(dupKey(row));
+    if (data.length < PAGE_SIZE) break;
+  }
+
+  const fresh = [];
+  let skipped = 0;
+  for (const rec of records) {
+    const k = dupKey(rec);
+    if (seen.has(k)) { skipped++; continue; }
+    seen.add(k);
+    fresh.push(rec);
+  }
+
+  if (fresh.length === 0) return json({ ok: true, inserted: 0, skipped, errors });
+
+  const INSERT_CHUNK = 500;
+  for (let i = 0; i < fresh.length; i += INSERT_CHUNK) {
+    const { error } = await supabaseAdmin
+      .from("reviews")
+      .insert(fresh.slice(i, i + INSERT_CHUNK));
+    if (error) return json({ ok: false, error: error.message, inserted: i, skipped }, { status: 500 });
+  }
+
+  return json({ ok: true, inserted: fresh.length, skipped, errors });
 };
 
 // ------------------- Component -------------------
@@ -324,7 +366,15 @@ export default function ImportPage() {
         </Card>
 
         {action?.ok ? (
-          <Banner tone="success" title={`Imported ${action.inserted} reviews`}>
+          <Banner
+            tone="success"
+            title={`Imported ${action.inserted} review${action.inserted === 1 ? "" : "s"}`}
+          >
+            {action.skipped ? (
+              <Text as="p">
+                {`Skipped ${action.skipped} row${action.skipped === 1 ? "" : "s"} already in the database (same product, reviewer and text).`}
+              </Text>
+            ) : null}
             {action.errors?.length ? (
               <BlockStack gap="100">
                 <Text as="p">Skipped rows:</Text>

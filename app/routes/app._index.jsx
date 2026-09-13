@@ -57,7 +57,7 @@ export const loader = async ({ request }) => {
   const [reviewsRes, shopRes] = await Promise.all([
     supabaseAdmin
       .from("reviews")
-      .select("id, product_id, product_handle, group_key, title, author_name, author_location, rating, content, status, source, image_urls, created_at")
+      .select("id, product_id, product_handle, group_key, author_name, author_location, rating, content, status, source, image_urls, created_at")
       .eq("shop_domain", shop)
       .order("created_at", { ascending: false })
       .limit(500),
@@ -73,6 +73,29 @@ export const loader = async ({ request }) => {
 };
 
 // ---------------- Action ----------------
+// Supabase/PostgREST puts the ids in the URL (?id=in.(...)), so a big selection
+// blows past the ~8KB request-line limit and the whole call is rejected. Send
+// them 100 at a time instead.
+const ID_CHUNK = 100;
+
+async function deleteIdsChunked(shop, ids) {
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const { error } = await supabaseAdmin
+      .from("reviews").delete().in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop);
+    if (error) throw new Error(error.message);
+  }
+  return ids.length;
+}
+
+async function updateIdsChunked(shop, ids, patch) {
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const { error } = await supabaseAdmin
+      .from("reviews").update(patch).in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop);
+    if (error) throw new Error(error.message);
+  }
+  return ids.length;
+}
+
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -212,8 +235,8 @@ export const action = async ({ request }) => {
     if (!dupIds.length) {
       return json({ ok: true, intent: "delete-duplicates", deleted: 0 });
     }
-    for (let i = 0; i < dupIds.length; i += 200) {
-      const chunk = dupIds.slice(i, i + 200);
+    for (let i = 0; i < dupIds.length; i += ID_CHUNK) {
+      const chunk = dupIds.slice(i, i + ID_CHUNK);
       const { error } = await supabaseAdmin
         .from("reviews").delete().in("id", chunk).eq("shop_domain", shop);
       if (error) return json({ ok: false, error: error.message }, { status: 500 });
@@ -221,24 +244,35 @@ export const action = async ({ request }) => {
     return json({ ok: true, intent: "delete-duplicates", deleted: dupIds.length });
   }
 
+  // ---- Clear the title on every review for this shop ----
+  if (intent === "clear-titles") {
+    const { error, count } = await supabaseAdmin
+      .from("reviews")
+      .update({ title: null }, { count: "exact" })
+      .eq("shop_domain", shop)
+      .not("title", "is", null);
+    if (error) return json({ ok: false, error: error.message }, { status: 500 });
+    return json({ ok: true, intent: "clear-titles", cleared: count ?? 0 });
+  }
+
   const ids = JSON.parse(form.get("ids") || "[]");
 
   if (!ids.length) return json({ ok: false, error: "No rows selected" }, { status: 400 });
 
   if (intent === "delete") {
-    const { error } = await supabaseAdmin.from("reviews").delete().in("id", ids).eq("shop_domain", shop);
-    if (error) return json({ ok: false, error: error.message }, { status: 500 });
-    return json({ ok: true });
+    try { await deleteIdsChunked(shop, ids); }
+    catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
+    return json({ ok: true, deleted: ids.length });
   }
   if (intent === "approve") {
-    const { error } = await supabaseAdmin.from("reviews").update({ status: "approved" }).in("id", ids).eq("shop_domain", shop);
-    if (error) return json({ ok: false, error: error.message }, { status: 500 });
-    return json({ ok: true });
+    try { await updateIdsChunked(shop, ids, { status: "approved" }); }
+    catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
+    return json({ ok: true, updated: ids.length });
   }
   if (intent === "hide") {
-    const { error } = await supabaseAdmin.from("reviews").update({ status: "hidden" }).in("id", ids).eq("shop_domain", shop);
-    if (error) return json({ ok: false, error: error.message }, { status: 500 });
-    return json({ ok: true });
+    try { await updateIdsChunked(shop, ids, { status: "hidden" }); }
+    catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
+    return json({ ok: true, updated: ids.length });
   }
   if (intent === "single-toggle") {
     const id = ids[0];
@@ -355,6 +389,10 @@ export default function AdminIndex() {
 
   const scanDuplicates = () => dupeFetcher.submit({ intent: "find-duplicates" }, { method: "post" });
   const confirmDeleteDuplicates = () => dupeFetcher.submit({ intent: "delete-duplicates" }, { method: "post" });
+
+  // ----- Clear review titles (shop-wide, irreversible) -----
+  const clearingTitles = fetcher.state !== "idle" && fetcher.formData?.get("intent") === "clear-titles";
+  const clearTitles = () => fetcher.submit({ intent: "clear-titles" }, { method: "post" });
 
   useEffect(() => {
     if (dupeFetcher.state !== "idle" || !dupeFetcher.data) return;
@@ -538,9 +576,6 @@ export default function AdminIndex() {
             overflow: "hidden",
             lineHeight: "1.4",
           }}>
-            {r.title ? (
-              <Text as="span" fontWeight="semibold" variant="bodySm">{r.title}. </Text>
-            ) : null}
             <Text as="span" variant="bodySm" tone="subdued">{r.content}</Text>
           </div>
         </IndexTable.Cell>
@@ -584,6 +619,7 @@ export default function AdminIndex() {
       secondaryActions={[
         { content: syncing ? "Syncing…" : "Sync product groups", onAction: syncGroups, loading: syncing },
         { content: scanning ? "Scanning…" : "Delete duplicates", onAction: scanDuplicates, loading: scanning },
+        { content: clearingTitles ? "Clearing…" : "Clear review titles", onAction: clearTitles, loading: clearingTitles },
       ]}
     >
       <TitleBar title="Reviews" />
@@ -605,6 +641,20 @@ export default function AdminIndex() {
                 clubbed across products that share a SKU base.
               </p>
             </Banner>
+          </Layout.Section>
+        ) : null}
+
+        {fetcher.data && fetcher.data.intent === "clear-titles" && fetcher.data.ok ? (
+          <Layout.Section>
+            <Banner tone="success" title="Review titles cleared" onDismiss={() => {}}>
+              <p>Removed the title from {fetcher.data.cleared} review{fetcher.data.cleared === 1 ? "" : "s"}.</p>
+            </Banner>
+          </Layout.Section>
+        ) : null}
+
+        {fetcher.data && fetcher.data.ok === false ? (
+          <Layout.Section>
+            <Banner tone="critical" title="That didn't work"><p>{fetcher.data.error}</p></Banner>
           </Layout.Section>
         ) : null}
 
