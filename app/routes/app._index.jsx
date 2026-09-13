@@ -78,22 +78,40 @@ export const loader = async ({ request }) => {
 // them 100 at a time instead.
 const ID_CHUNK = 100;
 
+// NOTE: .select() makes PostgREST return the rows it actually changed, so a
+// delete that silently matches nothing reports 0 instead of a false success.
 async function deleteIdsChunked(shop, ids) {
+  let affected = 0;
   for (let i = 0; i < ids.length; i += ID_CHUNK) {
-    const { error } = await supabaseAdmin
-      .from("reviews").delete().in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop);
+    const { data, error } = await supabaseAdmin
+      .from("reviews").delete().in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop)
+      .select("id");
     if (error) throw new Error(error.message);
+    affected += (data || []).length;
   }
-  return ids.length;
+  return affected;
 }
 
 async function updateIdsChunked(shop, ids, patch) {
+  let affected = 0;
   for (let i = 0; i < ids.length; i += ID_CHUNK) {
-    const { error } = await supabaseAdmin
-      .from("reviews").update(patch).in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop);
+    const { data, error } = await supabaseAdmin
+      .from("reviews").update(patch).in("id", ids.slice(i, i + ID_CHUNK)).eq("shop_domain", shop)
+      .select("id");
     if (error) throw new Error(error.message);
+    affected += (data || []).length;
   }
-  return ids.length;
+  return affected;
+}
+
+// Reads the `role` claim out of the Supabase key WITHOUT revealing the key.
+// If this isn't "service_role", RLS applies and every write quietly no-ops.
+function supabaseKeyRole() {
+  try {
+    const k = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+    const payload = JSON.parse(Buffer.from(k.split(".")[1], "base64").toString("utf8"));
+    return payload.role || "unknown";
+  } catch { return "unreadable"; }
 }
 
 export const action = async ({ request }) => {
@@ -235,13 +253,22 @@ export const action = async ({ request }) => {
     if (!dupIds.length) {
       return json({ ok: true, intent: "delete-duplicates", deleted: 0 });
     }
+    let actuallyDeleted = 0;
     for (let i = 0; i < dupIds.length; i += ID_CHUNK) {
       const chunk = dupIds.slice(i, i + ID_CHUNK);
-      const { error } = await supabaseAdmin
-        .from("reviews").delete().in("id", chunk).eq("shop_domain", shop);
+      const { data, error } = await supabaseAdmin
+        .from("reviews").delete().in("id", chunk).eq("shop_domain", shop)
+        .select("id");
       if (error) return json({ ok: false, error: error.message }, { status: 500 });
+      actuallyDeleted += (data || []).length;
     }
-    return json({ ok: true, intent: "delete-duplicates", deleted: dupIds.length });
+    return json({
+      ok: true,
+      intent: "delete-duplicates",
+      deleted: actuallyDeleted,
+      requested: dupIds.length,
+      keyRole: supabaseKeyRole(),
+    });
   }
 
   // ---- Clear the title on every review for this shop ----
@@ -260,19 +287,22 @@ export const action = async ({ request }) => {
   if (!ids.length) return json({ ok: false, error: "No rows selected" }, { status: 400 });
 
   if (intent === "delete") {
-    try { await deleteIdsChunked(shop, ids); }
+    let deleted;
+    try { deleted = await deleteIdsChunked(shop, ids); }
     catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
-    return json({ ok: true, deleted: ids.length });
+    return json({ ok: true, intent: "delete", deleted, requested: ids.length, keyRole: supabaseKeyRole() });
   }
   if (intent === "approve") {
-    try { await updateIdsChunked(shop, ids, { status: "approved" }); }
+    let updated;
+    try { updated = await updateIdsChunked(shop, ids, { status: "approved" }); }
     catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
-    return json({ ok: true, updated: ids.length });
+    return json({ ok: true, intent: "approve", updated, requested: ids.length, keyRole: supabaseKeyRole() });
   }
   if (intent === "hide") {
-    try { await updateIdsChunked(shop, ids, { status: "hidden" }); }
+    let updated;
+    try { updated = await updateIdsChunked(shop, ids, { status: "hidden" }); }
     catch (e) { return json({ ok: false, error: e.message }, { status: 500 }); }
-    return json({ ok: true, updated: ids.length });
+    return json({ ok: true, intent: "hide", updated, requested: ids.length, keyRole: supabaseKeyRole() });
   }
   if (intent === "single-toggle") {
     const id = ids[0];
@@ -282,9 +312,10 @@ export const action = async ({ request }) => {
     return json({ ok: true });
   }
   if (intent === "single-delete") {
-    const { error } = await supabaseAdmin.from("reviews").delete().eq("id", ids[0]).eq("shop_domain", shop);
+    const { data, error } = await supabaseAdmin
+      .from("reviews").delete().eq("id", ids[0]).eq("shop_domain", shop).select("id");
     if (error) return json({ ok: false, error: error.message }, { status: 500 });
-    return json({ ok: true });
+    return json({ ok: true, intent: "single-delete", deleted: (data || []).length, requested: 1, keyRole: supabaseKeyRole() });
   }
   if (intent === "set-images") {
     const id = ids[0];
@@ -651,6 +682,25 @@ export default function AdminIndex() {
             </Banner>
           </Layout.Section>
         ) : null}
+
+        {(() => {
+          const d = (dupeFetcher.data && dupeFetcher.data.requested != null) ? dupeFetcher.data : fetcher.data;
+          if (!d || !d.ok || d.requested == null) return null;
+          const done = d.deleted != null ? d.deleted : d.updated;
+          if (done === d.requested) return null;
+          return (
+            <Layout.Section>
+              <Banner tone="critical" title={`The database only changed ${done} of ${d.requested} rows`}>
+                <p>
+                  Supabase accepted the request but reported {done} row{done === 1 ? "" : "s"} affected.
+                  The key in use has the role <strong>{d.keyRole}</strong> — it must be{" "}
+                  <strong>service_role</strong>, otherwise row-level security silently blocks every
+                  write. Check SUPABASE_SERVICE_ROLE_KEY in your Vercel environment variables.
+                </p>
+              </Banner>
+            </Layout.Section>
+          );
+        })()}
 
         {fetcher.data && fetcher.data.ok === false ? (
           <Layout.Section>
